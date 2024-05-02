@@ -7,6 +7,9 @@ from sqlalchemy.ext.mutable import MutableList
 from sqlalchemy import PickleType
 from sqlalchemy import func
 from flask import Flask, jsonify
+import base64  # Add this line to import base64 module
+from flask import render_template_string
+
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root:@127.0.0.1:3306/pidevgymWeb'
 db = SQLAlchemy(app)
@@ -80,14 +83,35 @@ def recommend_events(user_id):
                           .filter(~Evenement.nom_evenement.in_(user_reservations)).all()
 
     # Prioritize events based on other users' behaviors
-    recommended_events = prioritize_events(recommended_events, user_id)
+    first_event, middle_event = prioritize_events(recommended_events, user_id)
 
-    # Execute the query and convert the results into a list of dicts
-    recommended_events = [{
-        'id': event.id,
-        'nom_evenement': event.nom_evenement,
-        'score': score
-    } for event, score in recommended_events.all()]
+    # Prepare the response
+    recommended_events = []
+
+    if first_event:
+        image = base64.b64encode(first_event[0].image).decode('utf-8') if first_event[0].image else None
+
+        recommended_events.append({
+            'id': first_event[0].id,
+            'nom_evenement': first_event[0].nom_evenement,
+            'date': first_event[0].date.strftime('%Y-%m-%d'),
+            'time': str(first_event[0].time),  # Use str function
+            'image': image,
+            'score': first_event[1]
+            
+        })
+
+    if middle_event:
+        image = base64.b64encode(middle_event[0].image).decode('utf-8') if middle_event[0].image else None
+
+        recommended_events.append({
+            'id': middle_event[0].id,
+            'nom_evenement': middle_event[0].nom_evenement,
+            'date': middle_event[0].date.strftime('%Y-%m-%d'),
+            'time': str(middle_event[0].time),  # Use str function
+            'image': image,
+            'score': middle_event[1]
+        })
 
     return jsonify(recommended_events)
 
@@ -118,16 +142,25 @@ def prioritize_events(recommended_events, user_id):
         event_scores, Evenement.id == event_scores.c.id
     ).order_by(
         event_scores.c.score.desc()
-    )
+    ).all()
 
-    return events
+    middle_index = len(events) // 2
+
+    # Return the first event and the middle event
+    first_event = events[0] if events else None
+    middle_event = events[middle_index] if events else None
+
+    return first_event, middle_event
 
 def home():
     evenements = Evenement.query.all()
     result = ''
     for evenement in evenements:
-        result += f'ID: {evenement.id}, Name: {evenement.nom_evenement}<br>'
-    return result
+        image = base64.b64encode(evenement.image).decode('utf-8') if evenement.image else None
+        result += f'<p>ID: {evenement.id}, Name: {evenement.nom_evenement}</p>'
+        if image:
+            result += f'<img src="data:image/jpeg;base64,{image}" alt="Event image">'
+    return render_template_string(result)
 
 if __name__ == "__main__":
     app.run(debug=True)
