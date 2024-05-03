@@ -91,79 +91,70 @@ class Recommendation(BaseModel):
 async def recommend_events(user_id: int):
     session = SessionLocal()
 
-    # Get user's past reservations
-    user_reservations = session.query(Reservation.nom_evenement).filter_by(user_id=user_id).all()
-    print(f"user_reservations: {user_reservations}")
+    try:
+        # Get user's past reservations
+        user_reservations = session.query(Reservation.nom_evenement).filter_by(user_id=user_id).all()
+        print(f"user_reservations: {user_reservations}")
 
-    user_categories = {reservation.nom_evenement for reservation in user_reservations}
+        user_categories = {reservation.nom_evenement for reservation in user_reservations}
 
-    # Find events in the same category that the user hasn't reserved yet
-    recommended_events = session.query(Evenement).filter(Evenement.categorie.in_(user_categories)) \
-                          .filter(~Evenement.nom_evenement.in_(user_reservations)).all()
+        # Find events in the same category that the user hasn't reserved yet
+        recommended_events = session.query(Evenement).filter(Evenement.categorie.in_(user_categories)) \
+                              .filter(~Evenement.nom_evenement.in_(user_reservations)).all()
 
-    # Prioritize events based on other users' behaviors
-    first_event, middle_event = prioritize_events(recommended_events, user_id)
-    print(f"first_event: {first_event}")
-    print(f"middle_event: {middle_event}")
-    # Prepare the response
-    recommended_events = []
-
-    if first_event and first_event[1] is not None :
-        image = base64.b64encode(first_event[0].image).decode('utf-8') if first_event[0].image else None
-
-        recommended_events.append({
-            'id': first_event[0].id,
-            'nom_evenement': first_event[0].nom_evenement,
-            'date': first_event[0].date.strftime('%Y-%m-%d'),
-            'time': str(first_event[0].time),  # Use str function
-            'image': image,
-            'score': first_event[1]
+        # Check if recommended_events is not empty
+        if recommended_events:
+            # Prioritize events based on other users' behaviors
+            first_event, middle_event = prioritize_events(recommended_events, user_id)
             
-        })
+            # Prepare the response
+            recommended_events = []
 
-    if middle_event and middle_event[1] is not None:
-        image = base64.b64encode(middle_event[0].image).decode('utf-8') if middle_event[0].image else None
-        recommended_events.append({
-            'id': middle_event[0].id,
-            'nom_evenement': middle_event[0].nom_evenement,
-            'date': middle_event[0].date.strftime('%Y-%m-%d'),
-            'time': str(middle_event[0].time),  # Use str function
-            'image': image,
-            'score': middle_event[1]
-        })
-    session.close()
+            if first_event and first_event[1] is not None:
+                image = base64.b64encode(first_event[0].image).decode('utf-8') if first_event[0].image else None
 
-    return recommended_events
+                recommended_events.append({
+                    'id': first_event[0].id,
+                    'nom_evenement': first_event[0].nom_evenement,
+                    'date': first_event[0].date.strftime('%Y-%m-%d'),
+                    'time': str(first_event[0].time),  # Use str function
+                    'image': image,
+                    'score': first_event[1]
+                })
 
-def prioritize_events(recommended_events, user_id):
+            if middle_event and middle_event[1] is not None:
+                image = base64.b64encode(middle_event[0].image).decode('utf-8') if middle_event[0].image else None
+
+                recommended_events.append({
+                    'id': middle_event[0].id,
+                    'nom_evenement': middle_event[0].nom_evenement,
+                    'date': middle_event[0].date.strftime('%Y-%m-%d'),
+                    'time': str(middle_event[0].time),  # Use str function
+                    'image': image,
+                    'score': middle_event[1]
+                })
+
+        else:
+            print("No recommended events found for this user.")
+
+        return recommended_events
+
+    finally:
+        session.close()
+
+def prioritize_events(recommended_events, user_id, user_reservations):
     session = SessionLocal()
 
     # Fetch all events that the user hasn't reserved yet
-    user_reservations = session.query(Reservation.nom_evenement).filter_by(user_id=user_id).subquery()
     candidate_events = [event.id for event in recommended_events]
 
-    # Calculate scores for each event based on other users' behaviors
-    event_scores = session.query(
-    Evenement,
-        (func.count(Reservation.id) * 0.6 + func.sum(Favoris.loved.cast(Integer)) * 0.4).label('score')
-    ).join(
-        Favoris, Favoris.evenement_id == Evenement.id
-    ).join(
-        Reservation, Reservation.nom_evenement == Evenement.nom_evenement
-    ).filter(
-        Evenement.id.in_(candidate_events)
-    ).group_by(
-        Evenement.id
-    ).subquery()
-
-    # Fetch the events and their scores
+    # Fetch the events and set score to 70 for all events
     events = session.query(
         Evenement,
-        event_scores.c.score
-    ).outerjoin(
-        event_scores, Evenement.id == event_scores.c.id
-    ).order_by(
-        event_scores.c.score.desc()
+        func.literal(70).label('score')  # Set score to 70 for all events
+    ).filter(
+        Evenement.id.in_(candidate_events),
+        Evenement.nom_evenement.notin_(user_reservations)  # Exclude events the user has already reserved
     ).all()
 
     middle_index = len(events) // 2
@@ -173,7 +164,7 @@ def prioritize_events(recommended_events, user_id):
     middle_event = events[middle_index] if events else None
     session.close()
     return first_event, middle_event
- 
+
 @app.get("/run_recommendation")
 async def run_recommendation():
     # Call your recommendation function here
