@@ -9,12 +9,19 @@ from sqlalchemy import func
 from flask import Flask, jsonify
 import base64  # Add this line to import base64 module
 from flask import render_template_string
+from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import List
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.ext.declarative import declarative_base
+app = FastAPI()
+DATABASE_URL = 'mysql+pymysql://root:@127.0.0.1:3306/pidevgymWeb'  # Replace with your actual database URL
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root:@127.0.0.1:3306/pidevgymWeb'
-db = SQLAlchemy(app)
-
-class User(db.Model, UserMixin):
+Base = declarative_base()
+class User(Base):
     __tablename__ = 'user'
     id = Column(Integer, primary_key=True)
     email = Column(String(180), unique=True, nullable=False)
@@ -31,7 +38,7 @@ class User(db.Model, UserMixin):
     # Define a relationship to the Reservation model
     reservations = relationship('Reservation', backref='user_reservations', cascade='all, delete-orphan')
 
-class Evenement(db.Model):
+class Evenement(Base):
     __tablename__ = 'evenement'
     id = Column(Integer, primary_key=True)
     nom_evenement = Column(String(255), nullable=False, unique=True)
@@ -49,7 +56,7 @@ class Evenement(db.Model):
     favoris = relationship('Favoris', backref='evenement_favoris')
     # Define a relationship to the Reservation model
 
-class Reservation(db.Model):
+class Reservation(Base):
     __tablename__ = 'reservation'
     id = Column(Integer, primary_key=True)
     date_reservation = Column(DateTime, nullable=False)
@@ -60,7 +67,7 @@ class Reservation(db.Model):
     user = relationship('User', backref='user_reservation')
     # Define a relationship to the Evenement model
 
-class Favoris(db.Model):
+class Favoris(Base):
     __tablename__ = 'favoris'
     id = Column(Integer, primary_key=True)
     loved = Column(Boolean, nullable=False)
@@ -72,23 +79,36 @@ class Favoris(db.Model):
     # Define a relationship to the Evenement model
     evenement = relationship('Evenement', backref='evenement_favoris')
 
-@app.route('/recommend/<int:user_id>')
-def recommend_events(user_id):
+class Recommendation(BaseModel):
+    id: int
+    nom_evenement: str
+    date: str
+    time: str
+    image: str
+    score: float
+
+@app.get("/recommend/{user_id}", response_model=List[Recommendation])
+async def recommend_events(user_id: int):
+    session = SessionLocal()
+
     # Get user's past reservations
-    user_reservations = db.session.query(Reservation.nom_evenement).filter_by(user_id=user_id).all()
+    user_reservations = session.query(Reservation.nom_evenement).filter_by(user_id=user_id).all()
+    print(f"user_reservations: {user_reservations}")
+
     user_categories = {reservation.nom_evenement for reservation in user_reservations}
 
     # Find events in the same category that the user hasn't reserved yet
-    recommended_events = db.session.query(Evenement).filter(Evenement.categorie.in_(user_categories)) \
+    recommended_events = session.query(Evenement).filter(Evenement.categorie.in_(user_categories)) \
                           .filter(~Evenement.nom_evenement.in_(user_reservations)).all()
 
     # Prioritize events based on other users' behaviors
     first_event, middle_event = prioritize_events(recommended_events, user_id)
-
+    print(f"first_event: {first_event}")
+    print(f"middle_event: {middle_event}")
     # Prepare the response
     recommended_events = []
 
-    if first_event:
+    if first_event and first_event[1] is not None :
         image = base64.b64encode(first_event[0].image).decode('utf-8') if first_event[0].image else None
 
         recommended_events.append({
@@ -101,9 +121,8 @@ def recommend_events(user_id):
             
         })
 
-    if middle_event:
+    if middle_event and middle_event[1] is not None:
         image = base64.b64encode(middle_event[0].image).decode('utf-8') if middle_event[0].image else None
-
         recommended_events.append({
             'id': middle_event[0].id,
             'nom_evenement': middle_event[0].nom_evenement,
@@ -112,16 +131,19 @@ def recommend_events(user_id):
             'image': image,
             'score': middle_event[1]
         })
+    session.close()
 
-    return jsonify(recommended_events)
+    return recommended_events
 
 def prioritize_events(recommended_events, user_id):
+    session = SessionLocal()
+
     # Fetch all events that the user hasn't reserved yet
-    user_reservations = db.session.query(Reservation.nom_evenement).filter_by(user_id=user_id).subquery()
+    user_reservations = session.query(Reservation.nom_evenement).filter_by(user_id=user_id).subquery()
     candidate_events = [event.id for event in recommended_events]
 
     # Calculate scores for each event based on other users' behaviors
-    event_scores = db.session.query(
+    event_scores = session.query(
     Evenement,
         (func.count(Reservation.id) * 0.6 + func.sum(Favoris.loved.cast(Integer)) * 0.4).label('score')
     ).join(
@@ -135,7 +157,7 @@ def prioritize_events(recommended_events, user_id):
     ).subquery()
 
     # Fetch the events and their scores
-    events = db.session.query(
+    events = session.query(
         Evenement,
         event_scores.c.score
     ).outerjoin(
@@ -149,18 +171,15 @@ def prioritize_events(recommended_events, user_id):
     # Return the first event and the middle event
     first_event = events[0] if events else None
     middle_event = events[middle_index] if events else None
-
+    session.close()
     return first_event, middle_event
-
-def home():
-    evenements = Evenement.query.all()
-    result = ''
-    for evenement in evenements:
-        image = base64.b64encode(evenement.image).decode('utf-8') if evenement.image else None
-        result += f'<p>ID: {evenement.id}, Name: {evenement.nom_evenement}</p>'
-        if image:
-            result += f'<img src="data:image/jpeg;base64,{image}" alt="Event image">'
-    return render_template_string(result)
+ 
+@app.get("/run_recommendation")
+async def run_recommendation():
+    # Call your recommendation function here
+    prioritize_events(recommended_events, user_id)
+    return {"message": "recommendation executed successfully"}
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=5000, reload=True)
